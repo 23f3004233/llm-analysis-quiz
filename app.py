@@ -17,6 +17,9 @@ client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 app = Flask(__name__)
 
+YOUR_EMAIL = os.environ.get("STUDENT_EMAIL", "your-email@example.com")
+YOUR_SECRET = os.environ.get("STUDENT_SECRET", "your-secret-string")
+
 def get_browser():
     chrome_options = Options()
     chrome_options.add_argument("--headless")
