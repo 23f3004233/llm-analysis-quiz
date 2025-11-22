@@ -10,8 +10,15 @@ import base64
 import traceback
 import re
 from urllib.parse import urljoin, urlparse
+import mimetypes
+from io import BytesIO
 
 from openai import OpenAI
+import speech_recognition as sr
+from pydub import AudioSegment
+import pandas as pd
+import PyPDF2
+from bs4 import BeautifulSoup
 
 # AI Pipe Configuration
 client = OpenAI(
@@ -23,51 +30,6 @@ app = Flask(__name__)
 
 YOUR_EMAIL = os.environ.get("STUDENT_EMAIL", "your-email@example.com")
 YOUR_SECRET = os.environ.get("STUDENT_SECRET", "your-secret-string")
-
-def ensure_absolute_url(url, base_url):
-    """Convert relative URL to absolute URL"""
-    if not url:
-        return ""
-    
-    # Strip whitespace
-    url = url.strip()
-    
-    # Already absolute
-    if url.startswith('http://') or url.startswith('https://'):
-        return url
-    
-    # Parse base URL to get domain
-    parsed_base = urlparse(base_url)
-    base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
-    
-    # Convert relative to absolute
-    absolute_url = urljoin(base_domain, url)
-    
-    print(f"  Converted '{url}' → '{absolute_url}'")
-    return absolute_url
-
-def fix_file_urls(files_needed, base_url):
-    """Convert relative file URLs to absolute"""
-    if not files_needed:
-        return []
-    
-    fixed_urls = []
-    parsed_base = urlparse(base_url)
-    base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
-    
-    for file_url in files_needed:
-        file_url = file_url.strip()
-        
-        # Already absolute
-        if file_url.startswith('http://') or file_url.startswith('https://'):
-            fixed_urls.append(file_url)
-        else:
-            # Convert relative to absolute
-            absolute_url = urljoin(base_domain, file_url)
-            print(f"  Fixed file URL: '{file_url}' → '{absolute_url}'")
-            fixed_urls.append(absolute_url)
-    
-    return fixed_urls
 
 def get_browser():
     """Initialize Chrome"""
@@ -88,31 +50,59 @@ def get_browser():
     for path in chrome_paths:
         if os.path.exists(path):
             chrome_options.binary_location = path
-            print(f"✓ Chrome: {path}")
             break
     
-    driver = webdriver.Chrome(options=chrome_options)
-    return driver
+    return webdriver.Chrome(options=chrome_options)
 
-def extract_urls_from_text(text, base_url):
-    """Extract URLs from text"""
-    urls = []
+def extract_all_links_from_html(html, base_url):
+    """Extract ALL downloadable links from HTML"""
+    soup = BeautifulSoup(html, 'html.parser')
+    links = []
     
-    # Find http/https URLs
-    http_pattern = r'https?://[^\s<>"{}|\\^`\[\]]+'
-    urls.extend(re.findall(http_pattern, text))
+    # Find all <a> tags with href
+    for a_tag in soup.find_all('a', href=True):
+        href = a_tag['href']
+        full_url = urljoin(base_url, href)
+        links.append({
+            'url': full_url,
+            'text': a_tag.get_text(strip=True),
+            'type': 'link'
+        })
     
-    # Find relative URLs that might be submit endpoints
-    relative_pattern = r'(?:POST|post|submit|POST to|post to)\s+(?:to\s+)?([/\w\-\.]+)'
-    relative_matches = re.findall(relative_pattern, text)
-    for match in relative_matches:
-        if match.startswith('/'):
-            urls.append(urljoin(base_url, match))
+    # Find all <source> tags (audio/video)
+    for source_tag in soup.find_all('source', src=True):
+        src = source_tag['src']
+        full_url = urljoin(base_url, src)
+        links.append({
+            'url': full_url,
+            'text': 'media',
+            'type': 'media'
+        })
     
-    return list(set(urls))
+    # Find all <audio> tags
+    for audio_tag in soup.find_all('audio', src=True):
+        src = audio_tag['src']
+        full_url = urljoin(base_url, src)
+        links.append({
+            'url': full_url,
+            'text': 'audio',
+            'type': 'audio'
+        })
+    
+    # Find all <video> tags
+    for video_tag in soup.find_all('video', src=True):
+        src = video_tag['src']
+        full_url = urljoin(base_url, src)
+        links.append({
+            'url': full_url,
+            'text': 'video',
+            'type': 'video'
+        })
+    
+    return links
 
 def fetch_quiz_page(url):
-    """Fetch quiz page"""
+    """Fetch quiz page and extract all content"""
     print(f"\n{'='*60}")
     print(f"Fetching: {url}")
     
@@ -125,32 +115,26 @@ def fetch_quiz_page(url):
         page_html = driver.page_source
         page_text = driver.find_element(By.TAG_NAME, "body").text
         
-        print(f"✓ Loaded: {len(page_text)} chars")
+        # Extract all links
+        all_links = extract_all_links_from_html(page_html, url)
+        
+        print(f"✓ Loaded: {len(page_text)} chars text")
+        print(f"✓ Found {len(all_links)} downloadable items")
+        
         print(f"\nText preview:")
         print("-" * 60)
         print(page_text[:800])
         print("-" * 60)
         
-        # Extract all URLs from page
-        found_urls = extract_urls_from_text(page_html + " " + page_text, url)
-        print(f"\n📎 URLs found in page: {len(found_urls)}")
-        for found_url in found_urls[:5]:  # Show first 5
-            print(f"  - {found_url}")
+        print(f"\nDownloadable items:")
+        for link in all_links[:10]:
+            print(f"  [{link['type']}] {link['url']}")
         
         return {
             "html": page_html,
             "text": page_text,
             "url": url,
-            "found_urls": found_urls
-        }
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        traceback.print_exc()
-        return {
-            "html": "",
-            "text": f"Error: {str(e)}",
-            "url": url,
-            "found_urls": []
+            "all_links": all_links
         }
     finally:
         if driver:
@@ -159,43 +143,202 @@ def fetch_quiz_page(url):
             except:
                 pass
 
-def download_file(url):
-    """Download file"""
+def detect_file_type(url, content_bytes=None):
+    """Detect file type from URL or content"""
+    # Try URL extension
+    parsed = urlparse(url)
+    ext = os.path.splitext(parsed.path)[1].lower()
+    
+    type_map = {
+        '.pdf': 'pdf',
+        '.csv': 'csv',
+        '.xlsx': 'excel',
+        '.xls': 'excel',
+        '.txt': 'text',
+        '.mp3': 'audio',
+        '.wav': 'audio',
+        '.ogg': 'audio',
+        '.mp4': 'video',
+        '.avi': 'video',
+        '.mov': 'video',
+        '.jpg': 'image',
+        '.jpeg': 'image',
+        '.png': 'image',
+        '.gif': 'image'
+    }
+    
+    if ext in type_map:
+        return type_map[ext]
+    
+    # Try MIME type from content
+    if content_bytes:
+        mime = mimetypes.guess_type(url)[0]
+        if mime:
+            if 'audio' in mime:
+                return 'audio'
+            elif 'video' in mime:
+                return 'video'
+            elif 'image' in mime:
+                return 'image'
+            elif 'pdf' in mime:
+                return 'pdf'
+    
+    return 'unknown'
+
+def transcribe_audio(audio_bytes):
+    """Transcribe audio to text using speech recognition"""
+    print("  🎤 Transcribing audio...")
+    
+    try:
+        # Convert audio to WAV format
+        audio = AudioSegment.from_file(BytesIO(audio_bytes))
+        audio = audio.set_channels(1).set_frame_rate(16000)
+        
+        wav_io = BytesIO()
+        audio.export(wav_io, format='wav')
+        wav_io.seek(0)
+        
+        # Use speech recognition
+        recognizer = sr.Recognizer()
+        with sr.AudioFile(wav_io) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
+        
+        print(f"  ✓ Transcribed: {len(text)} chars")
+        print(f"  Preview: {text[:200]}")
+        return text
+    
+    except Exception as e:
+        print(f"  ✗ Transcription failed: {e}")
+        # Fallback: try with OpenAI Whisper if available
+        try:
+            print("  Trying OpenAI Whisper...")
+            # Save audio temporarily
+            temp_audio = BytesIO(audio_bytes)
+            temp_audio.name = "audio.mp3"
+            
+            response = client.audio.transcriptions.create(
+                model="whisper-1",
+                file=temp_audio
+            )
+            text = response.text
+            print(f"  ✓ Whisper transcribed: {len(text)} chars")
+            return text
+        except Exception as e2:
+            print(f"  ✗ Whisper also failed: {e2}")
+            return None
+
+def process_pdf(pdf_bytes):
+    """Extract text from PDF"""
+    print("  📄 Processing PDF...")
+    try:
+        pdf_file = BytesIO(pdf_bytes)
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        
+        all_text = []
+        for i, page in enumerate(pdf_reader.pages):
+            text = page.extract_text()
+            all_text.append(f"[Page {i+1}]\n{text}")
+        
+        full_text = "\n\n".join(all_text)
+        print(f"  ✓ Extracted {len(full_text)} chars from {len(pdf_reader.pages)} pages")
+        return full_text
+    except Exception as e:
+        print(f"  ✗ PDF processing failed: {e}")
+        return None
+
+def process_csv(csv_bytes):
+    """Process CSV file"""
+    print("  📊 Processing CSV...")
+    try:
+        df = pd.read_csv(BytesIO(csv_bytes))
+        
+        # Get summary
+        summary = {
+            "shape": df.shape,
+            "columns": df.columns.tolist(),
+            "head": df.head(10).to_dict('records'),
+            "dtypes": df.dtypes.astype(str).to_dict(),
+            "describe": df.describe().to_dict() if not df.empty else {}
+        }
+        
+        print(f"  ✓ CSV: {df.shape[0]} rows x {df.shape[1]} columns")
+        return {
+            "dataframe": df,
+            "summary": summary,
+            "full_data": df.to_dict('records')
+        }
+    except Exception as e:
+        print(f"  ✗ CSV processing failed: {e}")
+        return None
+
+def download_and_process_file(url):
+    """Download and process any file type"""
     print(f"\n📥 Downloading: {url}")
+    
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()
-        content = base64.b64encode(response.content).decode('utf-8')
-        print(f"✓ Downloaded: {len(content)} chars")
-        return content
+        content = response.content
+        
+        file_type = detect_file_type(url, content)
+        print(f"  Type: {file_type}")
+        
+        result = {
+            "url": url,
+            "type": file_type,
+            "size": len(content),
+            "content": None,
+            "raw_base64": base64.b64encode(content).decode('utf-8')
+        }
+        
+        # Process based on type
+        if file_type == 'audio':
+            transcription = transcribe_audio(content)
+            result['content'] = transcription
+            result['transcription'] = transcription
+        
+        elif file_type == 'pdf':
+            text = process_pdf(content)
+            result['content'] = text
+            result['text'] = text
+        
+        elif file_type == 'csv':
+            csv_data = process_csv(content)
+            if csv_data:
+                result['content'] = csv_data['summary']
+                result['csv_data'] = csv_data
+        
+        elif file_type == 'text':
+            result['content'] = content.decode('utf-8', errors='ignore')
+        
+        print(f"  ✓ Processed successfully")
+        return result
+    
     except Exception as e:
-        print(f"✗ Failed: {e}")
+        print(f"  ✗ Download failed: {e}")
+        traceback.print_exc()
         return None
 
 def call_ai(prompt, max_retries=3):
-    """Call AI Pipe"""
+    """Call AI with robust error handling"""
     for attempt in range(max_retries):
         try:
-            print(f"\n🤖 AI Pipe call {attempt + 1}/{max_retries}...")
+            print(f"\n🤖 AI call {attempt + 1}/{max_retries}...")
             
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=4096,
-                temperature=0.1
+                temperature=0
             )
             
             response_text = resp.choices[0].message.content
             print(f"✓ Response: {len(response_text)} chars")
-            print(f"\nResponse preview:")
-            print("-" * 60)
-            print(response_text[:600])
-            print("-" * 60)
-            
             return response_text
             
         except Exception as e:
-            print(f"✗ Error attempt {attempt + 1}: {e}")
+            print(f"✗ Error: {e}")
             if attempt == max_retries - 1:
                 traceback.print_exc()
                 return None
@@ -204,46 +347,57 @@ def call_ai(prompt, max_retries=3):
     return None
 
 def solve_quiz_with_ai(quiz_data):
-    """Solve quiz"""
+    """Solve quiz using AI as a data analyst"""
     print(f"\n{'='*60}")
-    print("SOLVING QUIZ")
+    print("SOLVING QUIZ WITH AI")
     print(f"{'='*60}")
     
-    # Build context with found URLs
-    url_context = ""
-    if quiz_data.get('found_urls'):
-        url_context = f"\nURLs found in the page:\n"
-        for url in quiz_data['found_urls'][:10]:
-            url_context += f"  - {url}\n"
+    # Build comprehensive context
+    context_parts = [
+        "=== QUIZ PAGE CONTENT ===",
+        quiz_data['text'],
+        "\n=== AVAILABLE FILES ===",
+    ]
     
-    prompt = f"""You are solving a data analysis quiz. Analyze this page carefully.
+    for link in quiz_data.get('all_links', []):
+        context_parts.append(f"[{link['type']}] {link['url']} - {link['text']}")
+    
+    context = "\n".join(context_parts)
+    
+    prompt = f"""You are an expert data analyst solving a quiz. Your task is to analyze the question and determine what needs to be done.
 
-QUIZ PAGE TEXT:
-{quiz_data['text']}
+{context}
 
-{url_context}
+YOUR ROLE:
+- You are a professional data analyst
+- You must actually solve the problem, not just copy text
+- You must think step by step
+- You must identify ALL files that need to be downloaded
 
-YOUR TASK:
-1. Read the question carefully
-2. Find the submission URL - look for phrases like "Post your answer to", "submit to", "POST to"
-3. Identify any file download links
-4. Determine the answer
+CRITICAL INSTRUCTIONS:
+1. READ the question carefully and understand what is being asked
+2. IDENTIFY all files that need to be downloaded (CSV, PDF, audio, video, images, etc.)
+3. EXTRACT the submission URL from the page
+4. If you can answer without files, provide the answer
+5. If files are needed, list ALL file URLs
 
-CRITICAL RULES:
-- Extract the ACTUAL submission URL from the page text above
-- DO NOT use placeholder URLs like "complete-url-here.com" or "example.com"
-- The submit_url must be a real URL you found in the page content
-- If you see "Post to /submit", the full URL is https://tds-llm-analysis.s-anand.net/submit
+IMPORTANT RULES:
+- DO NOT just copy text from the question
+- DO NOT use placeholder URLs like "example.com"
+- DO NOT answer "your secret" or "anything you want" - these are just placeholders!
+- If the question shows "your secret", look for the ACTUAL secret value on the page
+- If you see audio/video files, you MUST include them in files_needed
+- Extract the REAL submission URL from the page content
 
-Respond with ONLY valid JSON (no markdown, no code blocks):
+RESPONSE FORMAT (JSON only, no markdown):
 {{
     "submit_url": "actual_url_from_page",
-    "answer": your_answer,
-    "files_needed": []
+    "reasoning": "brief explanation of what you understand",
+    "answer": your_answer_or_null,
+    "files_needed": ["url1", "url2"]
 }}
 
-HTML SNIPPET:
-{quiz_data['html'][:4000]}
+If you cannot determine the answer without files, set answer to null.
 """
 
     response_text = call_ai(prompt)
@@ -251,7 +405,7 @@ HTML SNIPPET:
         return None
 
     try:
-        # Clean and parse
+        # Parse response
         response_text = response_text.strip()
         for marker in ['```json', '```', '`']:
             response_text = response_text.replace(marker, '')
@@ -261,8 +415,7 @@ HTML SNIPPET:
         end = response_text.rfind('}') + 1
         
         if start == -1 or end == 0:
-            print(f"✗ No JSON found")
-            print(f"Response: {response_text}")
+            print(f"✗ No JSON in response")
             return None
         
         json_str = response_text[start:end]
@@ -271,46 +424,23 @@ HTML SNIPPET:
         print("\n✓ Parsed JSON:")
         print(json.dumps(result, indent=2))
         
-        # Validate submit_url
-        submit_url = result.get('submit_url', '').strip()
+        # Fix URLs
+        if result.get('submit_url'):
+            parsed_base = urlparse(quiz_data['url'])
+            base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+            result['submit_url'] = urljoin(base_domain, result['submit_url'])
         
-        # Check for placeholder/example URLs
-        invalid_domains = ['complete-url-here.com', 'example.com', 'your-url-here']
-        if any(domain in submit_url.lower() for domain in invalid_domains):
-            print(f"⚠️  AI returned placeholder URL: {submit_url}")
-            submit_url = ""
-        
-        if not submit_url:
-            print("⚠️  Empty submit_url, trying to find from page URLs")
-            # Look for submit/answer URLs in found_urls
-            for url in quiz_data.get('found_urls', []):
-                if any(keyword in url.lower() for keyword in ['submit', 'answer', 'quiz']):
-                    submit_url = url
-                    print(f"✓ Found submit URL: {submit_url}")
-                    break
-        
-        if not submit_url or not submit_url.startswith('http'):
-            print(f"✗ Invalid submit_url: '{submit_url}'")
-            # Try to construct from base URL
-            if quiz_data.get('found_urls'):
-                submit_url = quiz_data['found_urls'][0]
-                print(f"⚠️  Using first URL as fallback: {submit_url}")
-        
-        # Convert relative URLs to absolute
-        submit_url = ensure_absolute_url(submit_url, quiz_data['url'])
-        result['submit_url'] = submit_url
-        
-        print(f"✓ Final submit_url: {submit_url}")
-        
-        # Fix file URLs (convert relative to absolute)
         if result.get('files_needed'):
-            result['files_needed'] = fix_file_urls(result['files_needed'], quiz_data['url'])
-            print(f"✓ Files needed: {result['files_needed']}")
-        
-        # Validate answer exists
-        if 'answer' not in result and not result.get('files_needed'):
-            print("✗ Missing answer and files_needed")
-            return None
+            fixed_files = []
+            parsed_base = urlparse(quiz_data['url'])
+            base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+            
+            for file_url in result['files_needed']:
+                fixed_url = urljoin(base_domain, file_url)
+                fixed_files.append(fixed_url)
+                print(f"  File: {fixed_url}")
+            
+            result['files_needed'] = fixed_files
         
         return result
         
@@ -319,49 +449,67 @@ HTML SNIPPET:
         traceback.print_exc()
         return None
 
-def process_files_and_solve(quiz_data, files_needed):
-    """Process files"""
+def solve_with_processed_files(quiz_data, processed_files):
+    """Solve quiz after processing all files"""
     print(f"\n{'='*60}")
-    print(f"PROCESSING {len(files_needed)} FILES")
+    print("SOLVING WITH PROCESSED FILES")
     print(f"{'='*60}")
     
-    file_contents = {}
-    for file_url in files_needed:
-        content = download_file(file_url)
-        if content:
-            file_contents[file_url] = content[:10000]  # Truncate to avoid token limits
+    # Build comprehensive prompt with all processed data
+    file_context = []
+    
+    for pf in processed_files:
+        file_context.append(f"\n=== FILE: {pf['url']} ===")
+        file_context.append(f"Type: {pf['type']}")
+        
+        if pf['type'] == 'audio' and pf.get('transcription'):
+            file_context.append("Audio Transcription:")
+            file_context.append(pf['transcription'])
+        
+        elif pf['type'] == 'pdf' and pf.get('text'):
+            file_context.append("PDF Content:")
+            file_context.append(pf['text'][:2000])
+        
+        elif pf['type'] == 'csv' and pf.get('csv_data'):
+            csv_data = pf['csv_data']
+            file_context.append(f"CSV Shape: {csv_data['summary']['shape']}")
+            file_context.append(f"Columns: {csv_data['summary']['columns']}")
+            file_context.append(f"First 10 rows: {json.dumps(csv_data['summary']['head'], indent=2)}")
+            file_context.append(f"Statistics: {json.dumps(csv_data['summary']['describe'], indent=2)}")
+    
+    files_text = "\n".join(file_context)
+    
+    prompt = f"""You are an expert data analyst. You have been given a quiz question and all necessary files have been processed.
 
-    if not file_contents:
-        print("✗ No files downloaded")
-        return None
-
-    prompt = f"""Analyze these files to solve the quiz.
-
-QUESTION:
+=== ORIGINAL QUESTION ===
 {quiz_data['text']}
 
-FILES (base64 encoded):
-{json.dumps(list(file_contents.keys()))}
+=== PROCESSED FILES ===
+{files_text}
 
-First file preview (first 1000 chars of base64):
-{list(file_contents.values())[0][:1000] if file_contents else 'none'}
+YOUR TASK:
+You are a professional data analyst. You must:
+1. Understand what the question is asking
+2. Use the audio transcription (if any) to understand the exact task
+3. Analyze the data files (CSV, PDF, etc.)
+4. Perform the required calculations/analysis
+5. Provide the final answer
 
-INSTRUCTIONS:
-1. Decode the files from base64
-2. Extract the data needed to answer the question
-3. Calculate the correct answer
-4. Find the submission URL from the original question
+CRITICAL:
+- If there's an audio file, it likely contains instructions on what to do
+- Follow those instructions EXACTLY
+- Actually perform calculations, don't just guess
+- The answer must be precise and correct
 
-IMPORTANT: 
-- Do NOT use placeholder URLs
-- Extract the real submission URL from the question text above
-- If you see "Post to /submit", use the full domain from the quiz URL
-
-Return ONLY this JSON:
+RESPONSE FORMAT (JSON only):
 {{
-    "submit_url": "actual_url_extracted_from_question",
-    "answer": your_calculated_answer
+    "submit_url": "https://tds-llm-analysis.s-anand.net/submit",
+    "reasoning": "step by step explanation of your solution",
+    "calculations": "show your work",
+    "answer": your_final_answer
 }}
+
+The answer can be a number, string, boolean, or JSON object depending on what's asked.
 """
 
     response_text = call_ai(prompt)
@@ -376,21 +524,23 @@ Return ONLY this JSON:
         
         start = response_text.find('{')
         end = response_text.rfind('}') + 1
+        
         if start == -1 or end == 0:
             return None
         
         result = json.loads(response_text[start:end])
         
-        # Ensure submit_url is absolute
-        if 'submit_url' in result:
-            result['submit_url'] = ensure_absolute_url(
-                result['submit_url'], 
-                quiz_data['url']
-            )
-        elif quiz_data.get('found_urls'):
-            result['submit_url'] = quiz_data['found_urls'][0]
+        print("\n✓ Final answer:")
+        print(json.dumps(result, indent=2))
+        
+        # Fix submit URL
+        if result.get('submit_url'):
+            parsed_base = urlparse(quiz_data['url'])
+            base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+            result['submit_url'] = urljoin(base_domain, result['submit_url'])
         
         return result
+    
     except Exception as e:
         print(f"✗ Parse error: {e}")
         return None
@@ -409,7 +559,7 @@ def submit_answer(submit_url, email, secret, quiz_url, answer):
     }
     
     print(f"To: {submit_url}")
-    print(f"Payload: {json.dumps(payload, indent=2)}")
+    print(f"Answer: {answer}")
 
     try:
         response = requests.post(submit_url, json=payload, timeout=30)
@@ -421,14 +571,12 @@ def submit_answer(submit_url, email, secret, quiz_url, answer):
         return result
     except Exception as e:
         print(f"✗ Error: {e}")
-        traceback.print_exc()
         return {"correct": False, "reason": str(e)}
 
 def solve_quiz_chain(initial_url, email, secret, max_time=180):
-    """Solve quiz chain"""
+    """Solve complete quiz chain"""
     print(f"\n{'#'*60}")
     print(f"# QUIZ CHAIN START")
-    print(f"# URL: {initial_url}")
     print(f"{'#'*60}\n")
     
     start_time = time.time()
@@ -437,25 +585,37 @@ def solve_quiz_chain(initial_url, email, secret, max_time=180):
 
     while current_url and (time.time() - start_time) < max_time:
         print(f"\n{'*'*60}")
-        print(f"Quiz #{len(results) + 1}: {current_url}")
+        print(f"Quiz #{len(results) + 1}")
         print(f"Time: {time.time() - start_time:.1f}s / {max_time}s")
         print(f"{'*'*60}")
 
+        # Fetch page
         quiz_data = fetch_quiz_page(current_url)
         
+        # Solve with AI
         solution = solve_quiz_with_ai(quiz_data)
         if not solution:
-            print("✗ No solution")
-            results.append({"url": current_url, "error": "Failed to parse quiz"})
+            results.append({"url": current_url, "error": "Failed to parse"})
             break
 
+        # Download and process files if needed
         if solution.get("files_needed"):
-            print(f"\n📎 Files: {solution['files_needed']}")
-            solution = process_files_and_solve(quiz_data, solution["files_needed"])
-            if not solution:
-                results.append({"url": current_url, "error": "Failed with files"})
-                break
+            print(f"\n📎 Processing {len(solution['files_needed'])} files...")
+            
+            processed_files = []
+            for file_url in solution['files_needed']:
+                pf = download_and_process_file(file_url)
+                if pf:
+                    processed_files.append(pf)
+            
+            if processed_files:
+                # Re-solve with processed files
+                solution = solve_with_processed_files(quiz_data, processed_files)
+                if not solution:
+                    results.append({"url": current_url, "error": "Failed with files"})
+                    break
 
+        # Submit
         submit_result = submit_answer(
             solution["submit_url"],
             email,
@@ -472,7 +632,7 @@ def solve_quiz_chain(initial_url, email, secret, max_time=180):
         })
 
         if submit_result.get("correct"):
-            print("\n✅✅✅ CORRECT ✅✅✅")
+            print("\n✅ CORRECT")
         else:
             print(f"\n❌ WRONG: {submit_result.get('reason')}")
 
@@ -482,7 +642,7 @@ def solve_quiz_chain(initial_url, email, secret, max_time=180):
             break
 
     print(f"\n{'#'*60}")
-    print(f"# FINISHED: {len(results)} quizzes in {time.time() - start_time:.1f}s")
+    print(f"# FINISHED: {len(results)} quizzes")
     print(f"{'#'*60}\n")
 
     return results
@@ -529,8 +689,7 @@ def index():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     print(f"\n{'='*60}")
-    print(f"LLM Quiz Solver - Port {port}")
-    print(f"Email: {YOUR_EMAIL}")
-    print(f"AI: gpt-4o-mini via aipipe.org")
+    print(f"Production Quiz Solver - Port {port}")
+    print(f"Handles: Audio, Video, PDF, CSV, Images, Text")
     print(f"{'='*60}\n")
     app.run(host='0.0.0.0', port=port, debug=False)
