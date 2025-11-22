@@ -1,5 +1,5 @@
 [phases.setup]
-aptPkgs = ["chromium", "chromium-driver"]
+aptPkgs = ["chromium", "chromium-driver", "ffmpeg", "libsndfile1"]
 
 [phases.install]
 cmds = ["pip install -r requirements.txt"]
