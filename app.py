@@ -200,24 +200,26 @@ QUIZ PAGE TEXT:
 
 {url_context}
 
-INSTRUCTIONS:
-1. Read the question and understand what it's asking
-2. Identify the submission URL - look for phrases like "Post your answer to", "submit to", etc.
-3. Find any file download links (look for <a href> tags)
-4. Determine the answer to the question
+YOUR TASK:
+1. Read the question carefully
+2. Find the submission URL - look for phrases like "Post your answer to", "submit to", "POST to"
+3. Identify any file download links
+4. Determine the answer
 
-CRITICAL: The submit_url MUST be a complete valid URL starting with http:// or https://
+CRITICAL RULES:
+- Extract the ACTUAL submission URL from the page text above
+- DO NOT use placeholder URLs like "complete-url-here.com" or "example.com"
+- The submit_url must be a real URL you found in the page content
+- If you see "Post to /submit", the full URL is https://tds-llm-analysis.s-anand.net/submit
 
-Respond with ONLY this JSON (no markdown, no ```):
+Respond with ONLY valid JSON (no markdown, no code blocks):
 {{
-    "submit_url": "https://complete-url-here.com/submit",
+    "submit_url": "actual_url_from_page",
     "answer": your_answer,
-    "files_needed": ["https://file1.pdf", "https://file2.csv"]
+    "files_needed": []
 }}
 
-If no files needed, use empty array: "files_needed": []
-
-HTML SNIPPET (for finding URLs):
+HTML SNIPPET:
 {quiz_data['html'][:4000]}
 """
 
@@ -246,8 +248,14 @@ HTML SNIPPET (for finding URLs):
         print("\n✓ Parsed JSON:")
         print(json.dumps(result, indent=2))
         
-        # Validate and fix submit_url
+        # Validate submit_url
         submit_url = result.get('submit_url', '').strip()
+        
+        # Check for placeholder/example URLs
+        invalid_domains = ['complete-url-here.com', 'example.com', 'your-url-here']
+        if any(domain in submit_url.lower() for domain in invalid_domains):
+            print(f"⚠️  AI returned placeholder URL: {submit_url}")
+            submit_url = ""
         
         if not submit_url:
             print("⚠️  Empty submit_url, trying to find from page URLs")
@@ -311,17 +319,21 @@ First file preview (first 1000 chars of base64):
 {list(file_contents.values())[0][:1000] if file_contents else 'none'}
 
 INSTRUCTIONS:
-1. Decode the files
-2. Extract data as needed
-3. Calculate the answer
-4. Return JSON ONLY:
+1. Decode the files from base64
+2. Extract the data needed to answer the question
+3. Calculate the correct answer
+4. Find the submission URL from the original question
 
+IMPORTANT: 
+- Do NOT use placeholder URLs
+- Extract the real submission URL from the question text above
+- If you see "Post to /submit", use the full domain from the quiz URL
+
+Return ONLY this JSON:
 {{
-    "submit_url": "{quiz_data.get('found_urls', [''])[0]}",
+    "submit_url": "actual_url_extracted_from_question",
     "answer": your_calculated_answer
 }}
-
-Important: answer should be a number if calculating sums, counts, etc.
 """
 
     response_text = call_ai(prompt)
