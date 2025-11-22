@@ -46,6 +46,29 @@ def ensure_absolute_url(url, base_url):
     print(f"  Converted '{url}' → '{absolute_url}'")
     return absolute_url
 
+def fix_file_urls(files_needed, base_url):
+    """Convert relative file URLs to absolute"""
+    if not files_needed:
+        return []
+    
+    fixed_urls = []
+    parsed_base = urlparse(base_url)
+    base_domain = f"{parsed_base.scheme}://{parsed_base.netloc}"
+    
+    for file_url in files_needed:
+        file_url = file_url.strip()
+        
+        # Already absolute
+        if file_url.startswith('http://') or file_url.startswith('https://'):
+            fixed_urls.append(file_url)
+        else:
+            # Convert relative to absolute
+            absolute_url = urljoin(base_domain, file_url)
+            print(f"  Fixed file URL: '{file_url}' → '{absolute_url}'")
+            fixed_urls.append(absolute_url)
+    
+    return fixed_urls
+
 def get_browser():
     """Initialize Chrome"""
     chrome_options = Options()
@@ -278,6 +301,11 @@ HTML SNIPPET:
         result['submit_url'] = submit_url
         
         print(f"✓ Final submit_url: {submit_url}")
+        
+        # Fix file URLs (convert relative to absolute)
+        if result.get('files_needed'):
+            result['files_needed'] = fix_file_urls(result['files_needed'], quiz_data['url'])
+            print(f"✓ Files needed: {result['files_needed']}")
         
         # Validate answer exists
         if 'answer' not in result and not result.get('files_needed'):
