@@ -14,8 +14,8 @@ import mimetypes
 from io import BytesIO
 
 from openai import OpenAI
-import speech_recognition as sr
-from pydub import AudioSegment
+# import speech_recognition as sr
+# from pydub import AudioSegment
 import pandas as pd
 import PyPDF2
 from bs4 import BeautifulSoup
